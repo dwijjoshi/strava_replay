@@ -1,16 +1,16 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Play, Pause, Activity, RefreshCw } from 'lucide-react';
-import MapView from './components/MapView';
-import PlaybackControls from './components/PlaybackControls';
-import StatsPanel from './components/StatsPanel';
-import AchievementsPanel from './components/AchievementsPanel';
-import { parseGPX } from './utils/gpxParser';
+import React, { useState, useEffect, useRef } from "react";
+import { Play, Pause, Activity, RefreshCw } from "lucide-react";
+import MapView from "./components/MapView";
+import PlaybackControls from "./components/PlaybackControls";
+import StatsPanel from "./components/StatsPanel";
+import AchievementsPanel from "./components/AchievementsPanel";
+import { parseGPX } from "./utils/gpxParser";
 
 export default function App() {
   const [gpxData, setGpxData] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [fileName, setFileName] = useState('');
-  
+  const [fileName, setFileName] = useState("");
+
   // Replay State
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -28,15 +28,15 @@ export default function App() {
   const loadSampleGPX = async () => {
     setLoading(true);
     try {
-      const response = await fetch('/sample.gpx');
-      if (!response.ok) throw new Error('Failed to load sample GPX');
+      const response = await fetch("/sample.gpx");
+      if (!response.ok) throw new Error("Failed to load sample GPX");
       const text = await response.text();
       const parsed = parseGPX(text);
       setGpxData(parsed);
-      setFileName('Golden Gate Park Morning Run (Sample)');
+      setFileName("Golden Gate Park Morning Run (Sample)");
       resetReplay(parsed);
     } catch (err) {
-      console.error('Error fetching sample GPX:', err);
+      console.error("Error fetching sample GPX:", err);
     } finally {
       setLoading(false);
     }
@@ -115,8 +115,10 @@ export default function App() {
         setCurrentTime((prevTime) => {
           // Map standard duration (e.g. 1 hour) to play back in 25 seconds at 1x speed multiplier.
           const targetPlaybackDuration = 25; // seconds
-          const playbackSpeedFactor = gpxData.totalDuration / targetPlaybackDuration;
-          const increment = elapsedRealTimeSec * playbackSpeedFactor * speedMultiplier;
+          const playbackSpeedFactor =
+            gpxData.totalDuration / targetPlaybackDuration;
+          const increment =
+            elapsedRealTimeSec * playbackSpeedFactor * speedMultiplier;
           const nextTime = prevTime + increment;
 
           if (nextTime >= gpxData.totalDuration) {
@@ -165,57 +167,60 @@ export default function App() {
     try {
       // Capture browser screen/tab stream
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { displaySurface: 'browser' },
-        audio: false
+        video: { displaySurface: "browser" },
+        audio: false,
       });
-      
+
       streamRef.current = stream;
-      
-      const options = { mimeType: 'video/webm;codecs=vp9' };
+
+      const options = { mimeType: "video/webm;codecs=vp9" };
       const recorder = new MediaRecorder(stream, options);
       mediaRecorderRef.current = recorder;
-      
+
       const chunks = [];
       recorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) {
           chunks.push(e.data);
         }
       };
-      
+
       recorder.onstop = () => {
-        const blob = new Blob(chunks, { type: 'video/webm' });
+        const blob = new Blob(chunks, { type: "video/webm" });
         const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
+        const a = document.createElement("a");
         a.href = url;
         // Save as MP4 file extension as requested
-        a.download = `${fileName ? fileName.replace(/\.[^/.]+$/, "") : 'activity-replay'}.mp4`;
+        a.download = `${fileName ? fileName.replace(/\.[^/.]+$/, "") : "activity-replay"}.mp4`;
         a.click();
         URL.revokeObjectURL(url);
         setIsRecording(false);
         mediaRecorderRef.current = null;
         streamRef.current = null;
       };
-      
+
       setIsRecording(true);
       recorder.start();
-      
+
       // Auto-stop recording if sharing is stopped externally
       stream.getVideoTracks()[0].onended = () => {
-        if (recorder.state !== 'inactive') {
+        if (recorder.state !== "inactive") {
           recorder.stop();
         }
       };
     } catch (err) {
-      console.error('Error starting recording:', err);
+      console.error("Error starting recording:", err);
       setIsRecording(false);
     }
   };
 
   const handleStopRecording = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+    if (
+      mediaRecorderRef.current &&
+      mediaRecorderRef.current.state !== "inactive"
+    ) {
       mediaRecorderRef.current.stop();
       if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
+        streamRef.current.getTracks().forEach((track) => track.stop());
       }
     }
   };
@@ -329,7 +334,10 @@ export default function App() {
 
       {/* Footer */}
       <footer className="py-6 border-t border-slate-900 bg-[#070b14] mt-8 text-center text-xs text-slate-500 font-medium">
-        <p>&copy; {new Date().getFullYear()} Replay App &bull; Built with React, Tailwind CSS, and Leaflet.js</p>
+        <p>
+          &copy; {new Date().getFullYear()} Replay App &bull; Built with React,
+          Tailwind CSS, and Leaflet.js
+        </p>
       </footer>
     </div>
   );

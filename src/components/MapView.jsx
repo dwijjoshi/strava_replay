@@ -9,6 +9,61 @@ import {
 } from "react-leaflet";
 import L from "leaflet";
 
+// --- Chase-camera geo helpers -------------------------------------------
+const toRad = (deg) => (deg * Math.PI) / 180;
+const toDeg = (rad) => (rad * 180) / Math.PI;
+
+// Compass bearing (degrees, 0 = north, clockwise) from point A to point B.
+function calculateBearing(a, b) {
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const y = Math.sin(dLng) * Math.cos(lat2);
+  const x =
+    Math.cos(lat1) * Math.sin(lat2) -
+    Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+// Point at `distanceMeters` from `start`, along compass `bearingDeg`.
+// Used to push the camera's look-at target a little ahead of the runner.
+function destinationPoint(start, bearingDeg, distanceMeters) {
+  const R = 6371000;
+  const bearing = toRad(bearingDeg);
+  const lat1 = toRad(start.lat);
+  const lng1 = toRad(start.lng);
+  const angularDistance = distanceMeters / R;
+
+  const lat2 = Math.asin(
+    Math.sin(lat1) * Math.cos(angularDistance) +
+      Math.cos(lat1) * Math.sin(angularDistance) * Math.cos(bearing),
+  );
+  const lng2 =
+    lng1 +
+    Math.atan2(
+      Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(lat1),
+      Math.cos(angularDistance) - Math.sin(lat1) * Math.sin(lat2),
+    );
+
+  return { lat: toDeg(lat2), lng: toDeg(lng2) };
+}
+
+// Shortest-path angle interpolation (handles the 359deg -> 1deg wraparound).
+function lerpAngle(from, to, t) {
+  const diff = ((to - from + 540) % 360) - 180;
+  return (from + diff * t + 360) % 360;
+}
+
+// How many points to look back when computing heading - smooths out GPS
+// jitter that a 2-point bearing would be very sensitive to.
+const BEARING_LOOKBACK_STEPS = 5;
+// How much to smooth heading changes frame-to-frame (0-1, lower = smoother
+// but laggier, higher = snappier but jitterier).
+const BEARING_SMOOTHING = 0.15;
+// How far ahead of the runner (in meters) the camera looks - this is what
+// pushes the runner marker down/behind in the frame instead of dead-center.
+const CHASE_LOOKAHEAD_METERS = 20;
+
 // SVGs for the achievements
 const getIconSvg = (type) => {
   switch (type) {
@@ -37,9 +92,18 @@ const MapRefSetter = ({ onReady }) => {
 };
 
 // Create MapController to fit bounds and pan to active marker
-const MapController = ({ points, currentPoint, isPlaying, is3D }) => {
+const MapController = ({
+  points,
+  currentPoint,
+  currentPointIndex,
+  isPlaying,
+  is3D,
+}) => {
   const map = useMap();
   const lastStageRef = useRef("");
+  // Persists across renders so the lookahead direction changes smoothly
+  // frame-to-frame instead of snapping to each new noisy GPS-derived bearing.
+  const smoothedBearingRef = useRef(0);
 
   // Initial bounds fit on mount and when points change
   useEffect(() => {
@@ -88,26 +152,62 @@ const MapController = ({ points, currentPoint, isPlaying, is3D }) => {
         }
       }
 
-      if (isPlaying) {
-        if (currentStage === "track") {
-          map.setView([currentPoint.lat, currentPoint.lng], 17, {
-            animate: true,
-            duration: 0.3,
-          });
+      // Chase-cam mode: only while actively playing and mid-route (not
+      // during the intro/outro full-bounds shots). Map orientation stays
+      // fixed (north-up) - only the camera's look-at point shifts ahead
+      // of the runner, which is what pushes them down/behind in frame.
+      const chaseCamActive = isPlaying && currentStage === "track";
+
+      if (chaseCamActive) {
+        const lookbackIdx = Math.max(
+          0,
+          currentPointIndex - BEARING_LOOKBACK_STEPS,
+        );
+        const from = points[lookbackIdx];
+        const rawBearing = calculateBearing(from, currentPoint);
+
+        smoothedBearingRef.current = lerpAngle(
+          smoothedBearingRef.current,
+          rawBearing,
+          BEARING_SMOOTHING,
+        );
+
+        // Look slightly ahead of the runner along the heading (in real
+        // lat/lng terms, no map rotation involved), so the runner sits
+        // toward the rear of frame rather than dead-center.
+        const lookAt = destinationPoint(
+          currentPoint,
+          smoothedBearingRef.current,
+          CHASE_LOOKAHEAD_METERS,
+        );
+        map.setView([lookAt.lat, lookAt.lng], 17, {
+          animate: true,
+          duration: 0.3,
+        });
+      } else {
+        // Not chasing (paused, or intro/outro) - center exactly on the
+        // point, same as before.
+        if (isPlaying) {
+          if (currentStage === "track") {
+            map.setView([currentPoint.lat, currentPoint.lng], 17, {
+              animate: true,
+              duration: 0.3,
+            });
+          } else {
+            map.panTo([currentPoint.lat, currentPoint.lng], {
+              animate: true,
+              duration: 0.2,
+            });
+          }
         } else {
           map.panTo([currentPoint.lat, currentPoint.lng], {
             animate: true,
             duration: 0.2,
           });
         }
-      } else {
-        map.panTo([currentPoint.lat, currentPoint.lng], {
-          animate: true,
-          duration: 0.2,
-        });
       }
     }
-  }, [currentPoint, isPlaying, map, points, is3D]);
+  }, [currentPoint, currentPointIndex, isPlaying, map, points, is3D]);
 
   return null;
 };
@@ -196,19 +296,28 @@ export default function MapView({
         }}
       >
         {/* Animated Tilt Container
-            IMPORTANT: only `transform` changes here (rotateX + scale).
-            We never touch width/height/top/left anymore - those are
-            layout properties that resize Leaflet's actual DOM container
-            mid-animation, which is what caused the drift/glitch. scale()
-            compensates for the vertical foreshortening rotateX causes,
-            without ever changing Leaflet's real pixel dimensions. */}
+            IMPORTANT: only `transform` changes here - no layout properties.
+            rotateX tilts the TOP edge away from the viewer (perspective
+            foreshortening), which is why gaps show up at the top and not
+            evenly on all sides. A uniform scale() can't fix that without
+            over-zooming everything, so we use non-uniform scaleY (stretch
+            vertically more than horizontally, since rotateX only compresses
+            the vertical axis) plus a small translateY to pull the receding
+            top edge back into frame. Tune the four numbers below together:
+            - rotateX angle: lower = flatter / more "zoomed out" feel, less
+              foreshortening to compensate for (currently 32deg, was 40deg)
+            - scaleX: horizontal fill, rarely needs to be more than ~1.1-1.2
+            - scaleY: vertical fill, this is doing the real work here
+            - translateY: negative = shift content up to cover a top gap;
+              increase the magnitude if you still see gray at the top,
+              decrease it if you now see a gap at the bottom instead */}
         <div
           ref={tiltContainerRef}
           className="w-full h-full transition-transform duration-1000 ease-in-out"
           style={{
             transform: is3D
-              ? "rotateX(40deg) scale(1.6)"
-              : "rotateX(0deg) scale(1)",
+              ? "rotateX(32deg) scale(1.15, 1.45) translateY(-4%)"
+              : "rotateX(0deg) scale(1, 1) translateY(0%)",
             transformOrigin: "50% 50%",
             position: "absolute",
             top: "0%",
@@ -280,6 +389,7 @@ export default function MapView({
                 <MapController
                   points={points}
                   currentPoint={currentPoint}
+                  currentPointIndex={currentPointIndex}
                   isPlaying={isPlaying}
                   is3D={is3D}
                 />
